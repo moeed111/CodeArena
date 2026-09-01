@@ -1,7 +1,20 @@
 # ⚡ CodeArena — LeetCode-Style Coding Platform
 
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?logo=github&logoColor=white)](https://github.com/moeed111/CodeArena)
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.2.0-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![React](https://img.shields.io/badge/React-18.2.0-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon_Cloud-4169E1?logo=postgresql&logoColor=white)](https://neon.tech)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3.4-38B2AC?logo=tailwind-css&logoColor=white)](https://tailwindcss.com)
+
 A fully functional, production-ready coding platform built with:
 **Spring Boot 3** · **React 18** · **PostgreSQL / Neon Cloud** · **Docker Sandbox Engine** · **JWT Auth** · **CodeMirror 6 Editor** · **Tailwind CSS**
+
+---
+
+### 🔗 Quick Links
+- **Live Frontend App**: [https://code-arena-beta-nine.vercel.app/](https://code-arena-beta-nine.vercel.app/)
+- **GitHub Repository**: [https://github.com/moeed111/CodeArena](https://github.com/moeed111/CodeArena)
+- **Cloud Database**: [Neon.tech Console](https://console.neon.tech)
 
 ---
 
