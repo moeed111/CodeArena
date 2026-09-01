@@ -1,0 +1,86 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL Database ───────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: leetcode-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       leetcodedb
+      POSTGRES_USER:     leetcode
+      POSTGRES_PASSWORD: leetcode123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/main/resources/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U leetcode -d leetcodedb"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── Spring Boot Backend ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leetcode-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_USERNAME:      leetcode
+      DB_PASSWORD:      leetcode123
+      JWT_SECRET:       "changeme_use_a_long_random_secret_in_production_min64chars!"
+      JWT_EXPIRATION:   86400000
+      SANDBOX_IMAGE:    leetcode-sandbox:latest
+      SANDBOX_TIMEOUT:  5
+      SANDBOX_MEMORY:   256m
+      SANDBOX_CPU:      50000
+      CORS_ORIGINS:     "http://localhost:3000,http://frontend:3000"
+    volumes:
+      # Mount Docker socket so backend can spawn sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:     ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout:  10s
+      retries:  5
+
+  # ── React Frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context:    ./frontend
+      dockerfile: Dockerfile
+    container_name: leetcode-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      REACT_APP_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+
+  # ── Nginx Reverse Proxy (production) ─────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: leetcode-nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+    driver: local
