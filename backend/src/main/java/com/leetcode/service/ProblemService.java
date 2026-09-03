@@ -151,6 +151,81 @@ public class ProblemService {
         return stats;
     }
 
+    @Transactional
+    public ProblemDetailDto updateProblem(Long id, UpdateProblemRequest request) {
+        Problem problem = problemRepository.findById(id)
+            .orElseThrow(() -> new RuntimeException("Problem not found: " + id));
+
+        if (request.title()       != null) problem.setTitle(request.title());
+        if (request.description() != null) problem.setDescription(request.description());
+        if (request.difficulty()  != null) problem.setDifficulty(request.difficulty());
+        if (request.constraints() != null) problem.setConstraints(request.constraints());
+        if (request.starterCode() != null) problem.setStarterCode(request.starterCode());
+        if (request.solution()    != null) problem.setSolution(request.solution());
+        if (request.active()      != null) problem.setActive(request.active());
+
+        // Replace tags if provided
+        if (request.tags() != null) {
+            Set<Tag> tags = request.tags().stream()
+                .map(name -> tagRepository.findByName(name)
+                    .orElseGet(() -> tagRepository.save(Tag.builder().name(name).build())))
+                .collect(Collectors.toSet());
+            problem.setTags(tags);
+        }
+
+        // Replace examples if provided
+        if (request.examples() != null) {
+            problem.getExamples().clear();
+            List<ProblemExample> examples = new ArrayList<>();
+            for (int i = 0; i < request.examples().size(); i++) {
+                var e = request.examples().get(i);
+                ProblemExample ex = new ProblemExample();
+                ex.setProblem(problem);
+                ex.setInput(e.input());
+                ex.setOutput(e.output());
+                ex.setExplanation(e.explanation());
+                ex.setOrderIndex(e.orderIndex() > 0 ? e.orderIndex() : i);
+                examples.add(ex);
+            }
+            problem.getExamples().addAll(examples);
+        }
+
+        // Replace test cases if provided
+        if (request.testCases() != null) {
+            problem.getTestCases().clear();
+            List<TestCase> testCases = new ArrayList<>();
+            for (int i = 0; i < request.testCases().size(); i++) {
+                var tc = request.testCases().get(i);
+                TestCase testCase = new TestCase();
+                testCase.setProblem(problem);
+                testCase.setInput(tc.input());
+                testCase.setExpected(tc.expected());
+                testCase.setHidden(tc.hidden());
+                testCase.setOrderIndex(tc.orderIndex() > 0 ? tc.orderIndex() : i);
+                testCases.add(testCase);
+            }
+            problem.getTestCases().addAll(testCases);
+        }
+
+        Problem saved = problemRepository.save(problem);
+        return toDetailDto(saved, null);
+    }
+
+    @Transactional
+    public void deleteProblem(Long id) {
+        Problem problem = problemRepository.findById(id)
+            .orElseThrow(() -> new RuntimeException("Problem not found: " + id));
+        problemRepository.delete(problem);
+    }
+
+    @Transactional
+    public ProblemDetailDto toggleActive(Long id) {
+        Problem problem = problemRepository.findById(id)
+            .orElseThrow(() -> new RuntimeException("Problem not found: " + id));
+        problem.setActive(!problem.isActive());
+        return toDetailDto(problemRepository.save(problem), null);
+    }
+
     // ------------------------------------------------------------------ //
     //  Mapping helpers                                                     //
     // ------------------------------------------------------------------ //

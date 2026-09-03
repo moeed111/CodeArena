@@ -16,6 +16,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -66,6 +70,7 @@ public class UserService implements UserDetailsService {
             user.getId(),
             user.getUsername(),
             user.getEmail(),
+            user.getRole().name(),
             user.getAvatarUrl(),
             user.getBio(),
             user.getGithubUrl(),
@@ -86,6 +91,7 @@ public class UserService implements UserDetailsService {
             user.getId(),
             user.getUsername(),
             null, // hide email for public profile
+            user.getRole().name(),
             user.getAvatarUrl(),
             user.getBio(),
             user.getGithubUrl(),
@@ -147,5 +153,54 @@ public class UserService implements UserDetailsService {
             .map(s -> s.getProblem().getId())
             .distinct()
             .count();
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Admin operations                                                    //
+    // ------------------------------------------------------------------ //
+
+    @Transactional(readOnly = true)
+    public List<UserDtos.AdminUserDto> getAllUsers() {
+        return userRepository.findAll().stream()
+            .map(u -> new UserDtos.AdminUserDto(
+                u.getId(),
+                u.getUsername(),
+                u.getEmail(),
+                u.getRole().name(),
+                u.getStreak(),
+                u.getCreatedAt(),
+                submissionRepository.countByUserId(u.getId())
+            ))
+            .collect(Collectors.toList());
+    }
+
+    public UserDtos.AdminUserDto updateUserRole(Long userId, User.Role role) {
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new RuntimeException("User not found"));
+        user.setRole(role);
+        userRepository.save(user);
+        return new UserDtos.AdminUserDto(
+            user.getId(), user.getUsername(), user.getEmail(),
+            user.getRole().name(), user.getStreak(), user.getCreatedAt(),
+            submissionRepository.countByUserId(user.getId())
+        );
+    }
+
+    public void deleteUser(Long userId, Long requestingAdminId) {
+        if (userId.equals(requestingAdminId)) {
+            throw new IllegalArgumentException("Admins cannot delete their own account");
+        }
+        userRepository.findById(userId)
+            .orElseThrow(() -> new RuntimeException("User not found"));
+        userRepository.deleteById(userId);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Long> getAdminStats() {
+        Map<String, Long> stats = new LinkedHashMap<>();
+        stats.put("totalUsers",       userRepository.count());
+        stats.put("totalProblems",    problemRepository.count());
+        stats.put("totalSubmissions", submissionRepository.count());
+        return stats;
     }
 }

@@ -28,6 +28,9 @@ public interface SubmissionRepository extends JpaRepository<Submission, Long> {
     @Query("SELECT COUNT(s) FROM Submission s WHERE s.user.id = :userId")
     long countTotalByUserId(@Param("userId") Long userId);
 
+    @Query("SELECT COUNT(s) FROM Submission s WHERE s.user.id = :userId")
+    long countByUserId(@Param("userId") Long userId);
+
     @Query("SELECT COUNT(s) FROM Submission s WHERE s.user.id = :userId AND s.status = 'ACCEPTED'")
     long countAcceptedByUserId(@Param("userId") Long userId);
 

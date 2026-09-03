@@ -40,6 +40,18 @@ export default function Navbar() {
             {navLink('/problems', 'Problems')}
             {user && navLink('/submissions', 'Submissions')}
             {user && navLink('/dashboard', 'Dashboard')}
+            {user?.role === 'ADMIN' && (
+              <Link
+                to="/admin"
+                className={`text-sm font-medium transition-colors flex items-center gap-1 ${
+                  location.pathname.startsWith('/admin')
+                    ? 'text-violet-400'
+                    : 'text-gray-400 hover:text-violet-400'
+                }`}
+              >
+                🛡️ Admin
+              </Link>
+            )}
           </div>
 
           {/* Auth */}
@@ -48,6 +60,11 @@ export default function Navbar() {
               <>
                 <span className="hidden sm:block text-sm text-gray-400">
                   👋 {user.username}
+                  {user.role === 'ADMIN' && (
+                    <span style={{ marginLeft: 6, background: '#a78bfa20', border: '1px solid #a78bfa40', color: '#a78bfa', padding: '1px 7px', borderRadius: 5, fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                      Admin
+                    </span>
+                  )}
                 </span>
                 <button onClick={handleLogout} className="btn-secondary text-sm py-1.5">
                   Logout

@@ -72,4 +72,19 @@ export const usersApi = {
   getPublicProfile:(name)   => api.get(`/users/${name}`),
 };
 
+// ============================================================
+//  Admin
+// ============================================================
+export const adminApi = {
+  getStats:        ()              => api.get('/admin/stats'),
+  getUsers:        ()              => api.get('/admin/users'),
+  updateUserRole:  (id, role)      => api.put(`/admin/users/${id}/role`, { role }),
+  deleteUser:      (id)            => api.delete(`/admin/users/${id}`),
+  createProblem:   (data)          => api.post('/problems', data),
+  updateProblem:   (id, data)      => api.put(`/admin/problems/${id}`, data),
+  deleteProblem:   (id)            => api.delete(`/admin/problems/${id}`),
+  toggleProblem:   (id)            => api.patch(`/admin/problems/${id}/toggle`),
+};
+
 export default api;
+
