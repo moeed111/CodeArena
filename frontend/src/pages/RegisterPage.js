@@ -3,6 +3,24 @@ import { Link, useNavigate } from 'react-router-dom';
 import { register as registerApi } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 
+function Field({ name, label, type = 'text', placeholder, value, onChange, error }) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+      <input
+        name={name}
+        type={type}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder}
+        className={`input ${error ? 'border-red-500' : ''}`}
+        required
+      />
+      {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
 export default function RegisterPage() {
   const [form,    setForm]    = useState({ username: '', email: '', password: '', confirm: '' });
   const [errors,  setErrors]  = useState({});
@@ -52,19 +70,6 @@ export default function RegisterPage() {
     }
   };
 
-  const Field = ({ name, label, type = 'text', placeholder }) => (
-    <div>
-      <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
-      <input
-        name={name} type={type} value={form[name]}
-        onChange={handleChange} placeholder={placeholder}
-        className={`input ${errors[name] ? 'border-red-500' : ''}`}
-        required
-      />
-      {errors[name] && <p className="mt-1 text-xs text-red-400">{errors[name]}</p>}
-    </div>
-  );
-
   return (
     <div className="min-h-[calc(100vh-56px)] flex items-center justify-center px-4 py-8">
       <div className="w-full max-w-md">
@@ -82,10 +87,41 @@ export default function RegisterPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            <Field name="username"  label="Username"         placeholder="alice"           />
-            <Field name="email"     label="Email"     type="email"    placeholder="alice@example.com" />
-            <Field name="password"  label="Password"  type="password" placeholder="••••••••"          />
-            <Field name="confirm"   label="Confirm Password" type="password" placeholder="••••••••"   />
+            <Field
+              name="username"
+              label="Username"
+              placeholder="alice"
+              value={form.username}
+              onChange={handleChange}
+              error={errors.username}
+            />
+            <Field
+              name="email"
+              label="Email"
+              type="email"
+              placeholder="alice@example.com"
+              value={form.email}
+              onChange={handleChange}
+              error={errors.email}
+            />
+            <Field
+              name="password"
+              label="Password"
+              type="password"
+              placeholder="••••••••"
+              value={form.password}
+              onChange={handleChange}
+              error={errors.password}
+            />
+            <Field
+              name="confirm"
+              label="Confirm Password"
+              type="password"
+              placeholder="••••••••"
+              value={form.confirm}
+              onChange={handleChange}
+              error={errors.confirm}
+            />
 
             <button type="submit" disabled={loading} className="btn-primary w-full mt-2 py-2.5">
               {loading ? (
@@ -108,3 +144,4 @@ export default function RegisterPage() {
     </div>
   );
 }
+
