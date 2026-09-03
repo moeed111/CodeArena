@@ -4,11 +4,11 @@ import { login as loginApi } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginPage() {
-  const [form,    setForm]    = useState({ usernameOrEmail: '', password: '' });
-  const [error,   setError]   = useState('');
+  const [form, setForm] = useState({ usernameOrEmail: '', password: '' });
+  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
-  const navigate  = useNavigate();
+  const navigate = useNavigate();
 
   const handleChange = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
 
@@ -82,13 +82,7 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <div className="mt-4 p-3 rounded-lg bg-blue-900/20 border border-blue-700/30">
-            <p className="text-xs text-blue-400 font-medium mb-1">Demo credentials</p>
-            <p className="text-xs text-gray-400">
-              Username: <code className="text-blue-300">admin</code>
-              {'  '}Password: <code className="text-blue-300">admin123</code>
-            </p>
-          </div>
+
 
           <p className="mt-4 text-center text-sm text-gray-400">
             Don't have an account?{' '}
