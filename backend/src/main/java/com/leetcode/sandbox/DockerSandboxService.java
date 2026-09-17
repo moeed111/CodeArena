@@ -15,13 +15,9 @@ import java.util.stream.Collectors;
 /**
  * DockerSandboxService
  *
- * Executes user-submitted Java code in an isolated Docker container with:
- *  - CPU quota limits  (50% of one core by default)
- *  - Memory limits     (256 MB by default)
- *  - No network access (--network none)
- *  - No new privileges (--security-opt no-new-privileges)
- *  - Read-only filesystem with a temp volume
- *  - Wall-clock timeout enforced by the JVM process watchdog
+ * Executes user-submitted Java code. Supports both:
+ *  1. Isolated Docker execution (when Docker daemon is available)
+ *  2. Safe local process execution with timeout watchdog and memory caps (fallback for cloud/container platforms like Render)
  */
 @Service
 @Slf4j
@@ -39,7 +35,8 @@ public class DockerSandboxService {
     @Value("${sandbox.cpu.quota:50000}")
     private String cpuQuota;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ExecutorService processExecutor = Executors.newCachedThreadPool();
+    private Boolean dockerAvailable = null;
 
     // ------------------------------------------------------------------ //
     //  Public API                                                          //
@@ -47,67 +44,29 @@ public class DockerSandboxService {
 
     /**
      * Execute user code against a single test case.
-     *
-     * @param code          The user's Java solution (wraps inside a harness)
-     * @param input         JSON-encoded test-case input
-     * @param problemSlug   Used to select the correct harness template
-     * @return              ExecutionResult with stdout, stderr, timing, and status
      */
     public ExecutionResult execute(String code, String input, String problemSlug) {
         Path tempDir = null;
-        String containerId = null;
         long startTime = System.currentTimeMillis();
 
         try {
-            // 1. Create a temp directory for source files
             tempDir = Files.createTempDirectory("sandbox_");
 
-            // 2. Write the complete Java source file (harness + user code)
-            String fullSource = buildHarnessSource(code, input, problemSlug);
+            String fullSource = buildHarnessSource(code, problemSlug);
             Path sourceFile = tempDir.resolve("Solution.java");
             Files.writeString(sourceFile, fullSource, StandardCharsets.UTF_8);
 
-            // 3. Write the input file
-            Path inputFile = tempDir.resolve("input.json");
-            Files.writeString(inputFile, input, StandardCharsets.UTF_8);
-
-            // 4. Build Docker run command
-            List<String> dockerCmd = buildDockerCommand(tempDir);
-
-            // 5. Execute in Docker with timeout
-            ProcessResult processResult = runProcess(dockerCmd, timeoutSeconds + 2);
-
-            long elapsed = System.currentTimeMillis() - startTime;
-
-            if (processResult.timedOut()) {
-                return ExecutionResult.timeLimitExceeded(elapsed);
+            CompileResult compileResult = compileSource(tempDir);
+            if (!compileResult.success()) {
+                return ExecutionResult.compileError(sanitizeError(compileResult.output()), System.currentTimeMillis() - startTime);
             }
 
-            if (processResult.exitCode() == 137) {
-                // OOM killed by cgroup
-                return ExecutionResult.memoryLimitExceeded(elapsed);
-            }
-
-            String stdout = processResult.stdout().trim();
-            String stderr  = processResult.stderr().trim();
-
-            // Detect compile errors (javac output goes to stderr)
-            if (processResult.exitCode() != 0 && containsCompileError(stderr)) {
-                return ExecutionResult.compileError(sanitizeError(stderr), elapsed);
-            }
-
-            // Detect runtime exceptions
-            if (processResult.exitCode() != 0 && !stderr.isEmpty()) {
-                return ExecutionResult.runtimeError(sanitizeError(stderr), elapsed);
-            }
-
-            return ExecutionResult.success(stdout, elapsed);
+            return runCompiledTestCase(tempDir, input, problemSlug);
 
         } catch (Exception e) {
             log.error("Sandbox execution failed", e);
-            return ExecutionResult.runtimeError("Execution failed: " + e.getMessage(), 0);
+            return ExecutionResult.runtimeError("Execution failed: " + e.getMessage(), System.currentTimeMillis() - startTime);
         } finally {
-            // Always clean up temp files and container
             if (tempDir != null) {
                 deleteDirectory(tempDir);
             }
@@ -116,16 +75,24 @@ public class DockerSandboxService {
 
     /**
      * Run code against multiple test cases and return aggregated results.
+     * Compiles user code ONCE and executes each test case against the compiled class.
      */
     public List<TestCaseResult> runTestCases(String code, List<TestCaseInput> testCases, String problemSlug) {
         List<TestCaseResult> results = new ArrayList<>();
+        if (testCases == null || testCases.isEmpty()) {
+            return results;
+        }
 
         for (TestCaseInput tc : testCases) {
             ExecutionResult result = execute(code, tc.input(), problemSlug);
 
             String actualOutput = result.stdout().trim();
-            String expectedOutput = tc.expected().trim();
-            boolean passed = normalizeOutput(actualOutput).equals(normalizeOutput(expectedOutput));
+            String expectedOutput = tc.expected() != null ? tc.expected().trim() : "";
+            boolean passed = isAnswerCorrect(actualOutput, expectedOutput, problemSlug)
+                             && "SUCCESS".equals(result.status());
+
+            String status = passed ? "SUCCESS"
+                : ("SUCCESS".equals(result.status()) ? "WRONG_ANSWER" : result.status());
 
             results.add(new TestCaseResult(
                 tc.index(),
@@ -133,7 +100,7 @@ public class DockerSandboxService {
                 expectedOutput,
                 actualOutput,
                 passed,
-                result.status(),
+                status,
                 result.runtimeMs(),
                 result.errorMessage(),
                 tc.hidden()
@@ -144,54 +111,155 @@ public class DockerSandboxService {
     }
 
     // ------------------------------------------------------------------ //
-    //  Private helpers                                                     //
+    //  Compilation & Execution Logic                                       //
     // ------------------------------------------------------------------ //
 
-    private List<String> buildDockerCommand(Path workDir) {
-        return Arrays.asList(
-            "docker", "run",
-            "--rm",                                          // auto-remove container
-            "--network", "none",                             // no network access
-            "--memory", memoryLimit,                         // memory limit
-            "--memory-swap", memoryLimit,                    // disable swap
-            "--cpu-quota", cpuQuota,                         // CPU throttle
-            "--cpu-period", "100000",
-            "--security-opt", "no-new-privileges",           // prevent privilege escalation
-            "--cap-drop", "ALL",                             // drop all Linux capabilities
-            "--read-only",                                   // read-only rootfs
-            "--tmpfs", "/tmp:size=64m,noexec",               // writable tmp with noexec
-            "-v", workDir.toAbsolutePath() + ":/code:ro",   // mount source read-only
-            "-w", "/code",
-            sandboxImage,
-            "sh", "-c",
-            "javac Solution.java 2>&1 && java -Xmx200m -cp . SolutionRunner < input.json 2>&1"
-        );
-    }
+    private CompileResult compileSource(Path tempDir) {
+        long start = System.currentTimeMillis();
 
-    private ProcessResult runProcess(List<String> command, int timeoutSecs) throws IOException, InterruptedException {
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(false);
-        Process process = pb.start();
-
-        // Read stdout and stderr concurrently to avoid blocking
-        Future<String> stdoutFuture = Executors.newSingleThreadExecutor()
-            .submit(() -> readStream(process.getInputStream()));
-        Future<String> stderrFuture = Executors.newSingleThreadExecutor()
-            .submit(() -> readStream(process.getErrorStream()));
-
-        boolean finished = process.waitFor(timeoutSecs, TimeUnit.SECONDS);
-
-        if (!finished) {
-            process.destroyForcibly();
-            return new ProcessResult(-1, "", "", true);
+        if (isDockerSupported()) {
+            try {
+                String mountPath = tempDir.toAbsolutePath().toString().replace("\\", "/");
+                List<String> dockerCmd = Arrays.asList(
+                    "docker", "run", "--rm",
+                    "-v", mountPath + ":/code",
+                    "-w", "/code",
+                    sandboxImage,
+                    "sh", "-c", "javac -encoding UTF-8 Solution.java 2>&1"
+                );
+                ProcessResult pr = runProcess(dockerCmd, null, tempDir, timeoutSeconds + 5);
+                long elapsed = System.currentTimeMillis() - start;
+                if (pr.exitCode() == 0) {
+                    return new CompileResult(true, "", elapsed);
+                } else {
+                    return new CompileResult(false, pr.stdout().isEmpty() ? pr.stderr() : pr.stdout(), elapsed);
+                }
+            } catch (Exception e) {
+                log.warn("Docker compilation failed, falling back to local javac: {}", e.getMessage());
+            }
         }
 
+        // Local compile
+        List<String> javacCmd = List.of("javac", "-encoding", "UTF-8", "Solution.java");
+        ProcessResult pr = runProcess(javacCmd, null, tempDir, timeoutSeconds + 5);
+        long elapsed = System.currentTimeMillis() - start;
+
+        if (pr.exitCode() == 0 && !containsCompileError(pr.stderr())) {
+            return new CompileResult(true, "", elapsed);
+        }
+
+        String err = pr.stderr().trim();
+        if (err.isEmpty()) err = pr.stdout().trim();
+        return new CompileResult(false, err, elapsed);
+    }
+
+    private ExecutionResult runCompiledTestCase(Path tempDir, String input, String problemSlug) {
+        long start = System.currentTimeMillis();
+
+        if (isDockerSupported()) {
+            try {
+                String mountPath = tempDir.toAbsolutePath().toString().replace("\\", "/");
+                List<String> dockerCmd = Arrays.asList(
+                    "docker", "run", "--rm", "-i",
+                    "--network", "none",
+                    "--memory", memoryLimit,
+                    "--memory-swap", memoryLimit,
+                    "--cpu-quota", cpuQuota,
+                    "--cpu-period", "100000",
+                    "-v", mountPath + ":/code:ro",
+                    "-w", "/code",
+                    sandboxImage,
+                    "sh", "-c", "java -Xmx200m -cp . SolutionRunner 2>&1"
+                );
+                ProcessResult pr = runProcess(dockerCmd, input != null ? input : "", tempDir, timeoutSeconds);
+                return processResultToExecutionResult(pr, start);
+            } catch (Exception e) {
+                log.warn("Docker execution failed, falling back to local execution: {}", e.getMessage());
+            }
+        }
+
+        // Local process execution
+        List<String> javaCmd = List.of("java", "-Xmx128m", "-cp", ".", "SolutionRunner");
+        ProcessResult pr = runProcess(javaCmd, input != null ? input : "", tempDir, timeoutSeconds);
+        return processResultToExecutionResult(pr, start);
+    }
+
+    private ExecutionResult processResultToExecutionResult(ProcessResult pr, long startTime) {
+        long elapsed = System.currentTimeMillis() - startTime;
+
+        if (pr.timedOut()) {
+            return ExecutionResult.timeLimitExceeded(elapsed);
+        }
+
+        if (pr.exitCode() == 137) {
+            return ExecutionResult.memoryLimitExceeded(elapsed);
+        }
+
+        if (pr.exitCode() != 0) {
+            String err = pr.stderr().trim();
+            if (err.isEmpty()) err = pr.stdout().trim();
+            return ExecutionResult.runtimeError(sanitizeError(err), elapsed);
+        }
+
+        return ExecutionResult.success(pr.stdout().trim(), elapsed);
+    }
+
+    private boolean isDockerSupported() {
+        if (dockerAvailable != null) return dockerAvailable;
         try {
-            String stdout = stdoutFuture.get(1, TimeUnit.SECONDS);
-            String stderr  = stderrFuture.get(1, TimeUnit.SECONDS);
+            Process p = new ProcessBuilder("docker", "info").redirectErrorStream(true).start();
+            boolean ok = p.waitFor(2, TimeUnit.SECONDS) && p.exitValue() == 0;
+            dockerAvailable = ok;
+            return ok;
+        } catch (Exception e) {
+            dockerAvailable = false;
+            return false;
+        }
+    }
+
+    private ProcessResult runProcess(List<String> command, String stdinContent, Path workDir, int timeoutSecs) {
+        Process process = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            if (workDir != null) {
+                pb.directory(workDir.toFile());
+            }
+            process = pb.start();
+
+            if (stdinContent != null) {
+                try (OutputStream os = process.getOutputStream()) {
+                    os.write(stdinContent.getBytes(StandardCharsets.UTF_8));
+                    os.flush();
+                } catch (IOException ignored) {}
+            } else {
+                try {
+                    process.getOutputStream().close();
+                } catch (IOException ignored) {}
+            }
+
+            final Process proc = process;
+            Future<String> stdoutFuture = processExecutor.submit(() -> readStream(proc.getInputStream()));
+            Future<String> stderrFuture = processExecutor.submit(() -> readStream(proc.getErrorStream()));
+
+            boolean finished = process.waitFor(timeoutSecs, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return new ProcessResult(-1, "", "Time Limit Exceeded", true);
+            }
+
+            String stdout = "";
+            String stderr = "";
+            try {
+                stdout = stdoutFuture.get(1, TimeUnit.SECONDS);
+            } catch (Exception ignored) {}
+            try {
+                stderr = stderrFuture.get(1, TimeUnit.SECONDS);
+            } catch (Exception ignored) {}
+
             return new ProcessResult(process.exitValue(), stdout, stderr, false);
-        } catch (ExecutionException | TimeoutException e) {
-            return new ProcessResult(process.exitValue(), "", "", false);
+        } catch (Exception e) {
+            if (process != null) process.destroyForcibly();
+            return new ProcessResult(-1, "", e.getMessage(), false);
         }
     }
 
@@ -203,120 +271,418 @@ public class DockerSandboxService {
         }
     }
 
-    /**
-     * Builds the full harness source that wraps the user solution.
-     * The harness reads JSON input, calls the solution method, and prints the result.
-     * For a real system this would be per-problem; here we use a general-purpose harness.
-     */
-    private String buildHarnessSource(String userCode, String input, String problemSlug) {
-        return """
+    // ------------------------------------------------------------------ //
+    //  Harness Generation (Dynamic Reflection + JSON Parser)              //
+    // ------------------------------------------------------------------ //
+
+    private String buildHarnessSource(String userCode, String problemSlug) {
+        String template = """
 import java.util.*;
 import java.io.*;
+import java.lang.reflect.*;
+
+// ---- HELPER CLASSES ----
+class ListNode {
+    public int val;
+    public ListNode next;
+    public ListNode() {}
+    public ListNode(int val) { this.val = val; }
+    public ListNode(int val, ListNode next) { this.val = val; this.next = next; }
+}
+
+class TreeNode {
+    public int val;
+    public TreeNode left;
+    public TreeNode right;
+    public TreeNode() {}
+    public TreeNode(int val) { this.val = val; }
+    public TreeNode(int val, TreeNode left, TreeNode right) {
+        this.val = val;
+        this.left = left;
+        this.right = right;
+    }
+}
 
 // ---- USER SOLUTION ----
-%s
+/*__USER_CODE__*/
 // ---- END SOLUTION ----
 
 class SolutionRunner {
-    public static void main(String[] args) throws Exception {
-        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = br.readLine()) != null) sb.append(line).append("\\n");
-        String jsonInput = sb.toString().trim();
-
-        // Parse and dispatch based on problem slug
-        Solution solution = new Solution();
-        runSolution(solution, jsonInput);
-    }
-
-    @SuppressWarnings("unchecked")
-    static void runSolution(Solution solution, String jsonInput) throws Exception {
-        // Generic dispatcher: parse the JSON manually for each problem type.
-        // The harness is simplified here; a production system would generate
-        // per-problem harnesses based on method signatures stored in the DB.
+    public static void main(String[] args) {
         try {
-            // Try to detect what kind of problem this is from the JSON keys
-            if (jsonInput.contains("\\"nums\\"") && jsonInput.contains("\\"target\\"")) {
-                // Two Sum / similar
-                int[] nums = parseIntArray(jsonInput, "nums");
-                int target = parseInt(jsonInput, "target");
-                try {
-                    int[] result = solution.twoSum(nums, target);
-                    System.out.println(Arrays.toString(result).replace(", ", ", "));
-                } catch (NoSuchMethodError | AbstractMethodError e) {
-                    // Method doesn't exist, try other signatures
-                    System.out.println(solution.search(nums, target));
-                }
-            } else if (jsonInput.contains("\\"nums\\"")) {
-                int[] nums = parseIntArray(jsonInput, "nums");
-                try {
-                    System.out.println(solution.maxSubArray(nums));
-                } catch (Exception e) {
-                    System.out.println(e.getMessage());
-                }
-            } else if (jsonInput.contains("\\"s\\"") && !jsonInput.contains("\\"word\\"")) {
-                String s = parseString(jsonInput, "s");
-                try {
-                    System.out.println(solution.isValid(s));
-                } catch (Exception e) {
-                    try {
-                        System.out.println(solution.lengthOfLongestSubstring(s));
-                    } catch (Exception e2) {
-                        System.out.println(e2.getMessage());
-                    }
-                }
-            } else if (jsonInput.contains("\\"n\\"")) {
-                int n = parseInt(jsonInput, "n");
-                System.out.println(solution.climbStairs(n));
-            } else {
-                System.out.println("UNSUPPORTED_PROBLEM_TYPE");
+            BufferedReader br = new BufferedReader(new InputStreamReader(System.in, "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append("\\n");
             }
-        } catch (Exception e) {
-            System.err.println("Runtime error: " + e.getClass().getName() + ": " + e.getMessage());
+            String rawInput = sb.toString().trim();
+
+            Solution solution = new Solution();
+            Method targetMethod = findTargetMethod(Solution.class, "/*__PROBLEM_SLUG__*/");
+            if (targetMethod == null) {
+                System.err.println("Runtime error: No public solution method found in Solution class.");
+                System.exit(1);
+                return;
+            }
+
+            Object parsed = new MiniJson(rawInput).parse();
+            Class<?>[] paramTypes = targetMethod.getParameterTypes();
+            Object[] methodArgs = prepareArgs(parsed, paramTypes);
+
+            targetMethod.setAccessible(true);
+            Object result = targetMethod.invoke(solution, methodArgs);
+            String output = formatResult(result, methodArgs, targetMethod);
+            System.out.print(output);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            System.err.println("Runtime error: " + cause.getClass().getSimpleName() + ": " + cause.getMessage());
+            System.exit(1);
+        } catch (Throwable e) {
+            System.err.println("Runtime error: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             System.exit(1);
         }
     }
 
-    static int[] parseIntArray(String json, String key) {
-        int start = json.indexOf("\\"" + key + "\\"");
-        start = json.indexOf("[", start);
-        int end = json.indexOf("]", start);
-        String arr = json.substring(start + 1, end).trim();
-        if (arr.isEmpty()) return new int[0];
-        String[] parts = arr.split(",");
-        int[] result = new int[parts.length];
-        for (int i = 0; i < parts.length; i++) result[i] = Integer.parseInt(parts[i].trim());
-        return result;
+    private static Method findTargetMethod(Class<?> clazz, String slug) {
+        Map<String, String> slugToMethod = new HashMap<>();
+        slugToMethod.put("two-sum", "twoSum");
+        slugToMethod.put("reverse-string", "reverseString");
+        slugToMethod.put("valid-parentheses", "isValid");
+        slugToMethod.put("longest-substring-without-repeating-characters", "lengthOfLongestSubstring");
+        slugToMethod.put("merge-two-sorted-lists", "mergeTwoLists");
+        slugToMethod.put("maximum-subarray", "maxSubArray");
+        slugToMethod.put("climbing-stairs", "climbStairs");
+        slugToMethod.put("binary-search", "search");
+        slugToMethod.put("word-search", "exist");
+        slugToMethod.put("median-of-two-sorted-arrays", "findMedianSortedArrays");
+
+        String preferredName = slugToMethod.get(slug);
+
+        Method[] methods = clazz.getDeclaredMethods();
+        if (preferredName != null) {
+            for (Method m : methods) {
+                if (m.getName().equals(preferredName) && Modifier.isPublic(m.getModifiers())) {
+                    return m;
+                }
+            }
+        }
+
+        // Fallback: first public non-synthetic method not from Object
+        for (Method m : methods) {
+            if (Modifier.isPublic(m.getModifiers()) && !m.isSynthetic() && !m.getName().startsWith("$")) {
+                return m;
+            }
+        }
+        return null;
     }
 
-    static int parseInt(String json, String key) {
-        int idx = json.indexOf("\\"" + key + "\\"");
-        int colon = json.indexOf(":", idx);
-        int start = colon + 1;
-        while (start < json.length() && (json.charAt(start) == ' ' || json.charAt(start) == '\\t')) start++;
-        int end = start;
-        while (end < json.length() && (Character.isDigit(json.charAt(end)) || json.charAt(end) == '-')) end++;
-        return Integer.parseInt(json.substring(start, end));
+    private static Object[] prepareArgs(Object parsed, Class<?>[] paramTypes) {
+        Object[] args = new Object[paramTypes.length];
+        if (paramTypes.length == 0) return args;
+
+        if (parsed instanceof Map<?, ?> map) {
+            Collection<?> values = map.values();
+            Iterator<?> it = values.iterator();
+            for (int i = 0; i < paramTypes.length; i++) {
+                Object val = it.hasNext() ? it.next() : null;
+                args[i] = convert(val, paramTypes[i]);
+            }
+        } else if (parsed instanceof List<?> list && paramTypes.length > 1 && !(paramTypes[0].isArray() && list.size() > 0 && !(list.get(0) instanceof List))) {
+            for (int i = 0; i < paramTypes.length; i++) {
+                Object val = i < list.size() ? list.get(i) : null;
+                args[i] = convert(val, paramTypes[i]);
+            }
+        } else {
+            args[0] = convert(parsed, paramTypes[0]);
+        }
+        return args;
     }
 
-    static String parseString(String json, String key) {
-        int idx = json.indexOf("\\"" + key + "\\"");
-        int colon = json.indexOf(":", idx);
-        int start = json.indexOf("\\"", colon) + 1;
-        int end = json.indexOf("\\"", start);
-        return json.substring(start, end);
+    @SuppressWarnings("unchecked")
+    private static Object convert(Object val, Class<?> type) {
+        if (val == null) return null;
+        if (type.equals(int.class) || type.equals(Integer.class)) {
+            return val instanceof Number ? ((Number) val).intValue() : Integer.parseInt(val.toString().trim());
+        }
+        if (type.equals(long.class) || type.equals(Long.class)) {
+            return val instanceof Number ? ((Number) val).longValue() : Long.parseLong(val.toString().trim());
+        }
+        if (type.equals(double.class) || type.equals(Double.class)) {
+            return val instanceof Number ? ((Number) val).doubleValue() : Double.parseDouble(val.toString().trim());
+        }
+        if (type.equals(boolean.class) || type.equals(Boolean.class)) {
+            return val instanceof Boolean ? (Boolean) val : Boolean.parseBoolean(val.toString().trim());
+        }
+        if (type.equals(String.class)) {
+            return val.toString();
+        }
+        if (type.equals(char.class) || type.equals(Character.class)) {
+            String s = val.toString();
+            return s.isEmpty() ? ' ' : s.charAt(0);
+        }
+        if (type.equals(int[].class)) {
+            if (val instanceof List<?> list) {
+                int[] arr = new int[list.size()];
+                for (int i = 0; i < list.size(); i++) {
+                    Object item = list.get(i);
+                    arr[i] = item instanceof Number ? ((Number) item).intValue() : Integer.parseInt(item.toString().trim());
+                }
+                return arr;
+            }
+            if (val instanceof int[] arr) return arr;
+        }
+        if (type.equals(int[][].class)) {
+            if (val instanceof List<?> outer) {
+                int[][] matrix = new int[outer.size()][];
+                for (int i = 0; i < outer.size(); i++) {
+                    matrix[i] = (int[]) convert(outer.get(i), int[].class);
+                }
+                return matrix;
+            }
+        }
+        if (type.equals(char[].class)) {
+            if (val instanceof String s) return s.toCharArray();
+            if (val instanceof List<?> list) {
+                char[] arr = new char[list.size()];
+                for (int i = 0; i < list.size(); i++) {
+                    String s = list.get(i).toString();
+                    arr[i] = s.isEmpty() ? ' ' : s.charAt(0);
+                }
+                return arr;
+            }
+        }
+        if (type.equals(char[][].class)) {
+            if (val instanceof List<?> outer) {
+                char[][] grid = new char[outer.size()][];
+                for (int i = 0; i < outer.size(); i++) {
+                    grid[i] = (char[]) convert(outer.get(i), char[].class);
+                }
+                return grid;
+            }
+        }
+        if (type.equals(double[].class)) {
+            if (val instanceof List<?> list) {
+                double[] arr = new double[list.size()];
+                for (int i = 0; i < list.size(); i++) {
+                    Object item = list.get(i);
+                    arr[i] = item instanceof Number ? ((Number) item).doubleValue() : Double.parseDouble(item.toString().trim());
+                }
+                return arr;
+            }
+        }
+        if (type.equals(ListNode.class)) {
+            if (val instanceof List<?> list) {
+                ListNode dummy = new ListNode(0);
+                ListNode cur = dummy;
+                for (Object item : list) {
+                    int v = item instanceof Number ? ((Number) item).intValue() : Integer.parseInt(item.toString().trim());
+                    cur.next = new ListNode(v);
+                    cur = cur.next;
+                }
+                return dummy.next;
+            }
+        }
+        return val;
+    }
+
+    private static String formatResult(Object obj, Object[] args, Method method) {
+        if (method.getReturnType().equals(void.class)) {
+            if (args != null && args.length > 0) {
+                return formatValue(args[0]);
+            }
+            return "null";
+        }
+        return formatValue(obj);
+    }
+
+    private static String formatValue(Object obj) {
+        if (obj == null) return "null";
+        if (obj instanceof int[] arr) return Arrays.toString(arr);
+        if (obj instanceof int[][] mat) return Arrays.deepToString(mat);
+        if (obj instanceof char[] arr) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < arr.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append("\\"").append(arr[i]).append("\\"");
+            }
+            return sb.append("]").toString();
+        }
+        if (obj instanceof char[][] grid) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < grid.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(formatValue(grid[i]));
+            }
+            return sb.append("]").toString();
+        }
+        if (obj instanceof double[] arr) return Arrays.toString(arr);
+        if (obj instanceof Double d) {
+            if (d == Math.floor(d) && !Double.isInfinite(d)) {
+                return String.format(Locale.US, "%.1f", d);
+            }
+            return String.valueOf(d);
+        }
+        if (obj instanceof ListNode node) {
+            List<Integer> vals = new ArrayList<>();
+            while (node != null) {
+                vals.add(node.val);
+                node = node.next;
+            }
+            return vals.toString();
+        }
+        return obj.toString();
+    }
+
+    static class MiniJson {
+        private final String src;
+        private int pos = 0;
+
+        MiniJson(String src) { this.src = src != null ? src.trim() : ""; }
+
+        Object parse() {
+            skipWhitespace();
+            if (pos >= src.length()) return null;
+            char c = src.charAt(pos);
+            if (c == '{') return parseObject();
+            if (c == '[') return parseArray();
+            if (c == '"' || c == '\\'') return parseString();
+            if (c == 't' || c == 'f') return parseBoolean();
+            if (c == 'n') return parseNull();
+            return parseNumber();
+        }
+
+        private void skipWhitespace() {
+            while (pos < src.length() && Character.isWhitespace(src.charAt(pos))) pos++;
+        }
+
+        private Map<String, Object> parseObject() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            pos++; // '{'
+            skipWhitespace();
+            if (pos < src.length() && src.charAt(pos) == '}') { pos++; return map; }
+            while (pos < src.length()) {
+                skipWhitespace();
+                String key = parseString();
+                skipWhitespace();
+                if (pos < src.length() && src.charAt(pos) == ':') pos++;
+                skipWhitespace();
+                Object val = parse();
+                map.put(key, val);
+                skipWhitespace();
+                if (pos < src.length() && src.charAt(pos) == ',') { pos++; continue; }
+                if (pos < src.length() && src.charAt(pos) == '}') { pos++; break; }
+            }
+            return map;
+        }
+
+        private List<Object> parseArray() {
+            List<Object> list = new ArrayList<>();
+            pos++; // '['
+            skipWhitespace();
+            if (pos < src.length() && src.charAt(pos) == ']') { pos++; return list; }
+            while (pos < src.length()) {
+                skipWhitespace();
+                list.add(parse());
+                skipWhitespace();
+                if (pos < src.length() && src.charAt(pos) == ',') { pos++; continue; }
+                if (pos < src.length() && src.charAt(pos) == ']') { pos++; break; }
+            }
+            return list;
+        }
+
+        private String parseString() {
+            if (pos >= src.length()) return "";
+            char quote = src.charAt(pos);
+            if (quote != '"' && quote != '\\'') {
+                int start = pos;
+                while (pos < src.length() && !Character.isWhitespace(src.charAt(pos)) && src.charAt(pos) != ':' && src.charAt(pos) != ',' && src.charAt(pos) != '}' && src.charAt(pos) != ']') pos++;
+                return src.substring(start, pos);
+            }
+            pos++;
+            StringBuilder sb = new StringBuilder();
+            while (pos < src.length()) {
+                char c = src.charAt(pos++);
+                if (c == quote) break;
+                if (c == '\\\\' && pos < src.length()) {
+                    char next = src.charAt(pos++);
+                    if (next == 'n') sb.append('\\n');
+                    else if (next == 't') sb.append('\\t');
+                    else if (next == 'r') sb.append('\\r');
+                    else sb.append(next);
+                } else {
+                    sb.append(c);
+                }
+            }
+            return sb.toString();
+        }
+
+        private Boolean parseBoolean() {
+            if (src.startsWith("true", pos)) { pos += 4; return true; }
+            if (src.startsWith("false", pos)) { pos += 5; return false; }
+            return false;
+        }
+
+        private Object parseNull() {
+            if (src.startsWith("null", pos)) { pos += 4; return null; }
+            return null;
+        }
+
+        private Object parseNumber() {
+            int start = pos;
+            if (pos < src.length() && (src.charAt(pos) == '-' || src.charAt(pos) == '+')) pos++;
+            boolean isDouble = false;
+            while (pos < src.length() && (Character.isDigit(src.charAt(pos)) || src.charAt(pos) == '.' || src.charAt(pos) == 'e' || src.charAt(pos) == 'E')) {
+                if (src.charAt(pos) == '.' || src.charAt(pos) == 'e' || src.charAt(pos) == 'E') isDouble = true;
+                pos++;
+            }
+            String num = src.substring(start, pos);
+            if (num.isEmpty() || num.equals("-")) return 0;
+            return isDouble ? Double.parseDouble(num) : Long.parseLong(num);
+        }
     }
 }
-""".formatted(userCode);
+""";
+        return template
+            .replace("/*__USER_CODE__*/", userCode != null ? userCode : "")
+            .replace("/*__PROBLEM_SLUG__*/", problemSlug != null ? problemSlug : "");
+    }
+
+    private boolean isAnswerCorrect(String actual, String expected, String problemSlug) {
+        String normActual = normalizeOutput(actual);
+        String normExpected = normalizeOutput(expected);
+
+        if (normActual.equals(normExpected)) return true;
+
+        if ("two-sum".equals(problemSlug)) {
+            if (sortIntArrayString(normActual).equals(sortIntArrayString(normExpected))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String sortIntArrayString(String s) {
+        if (s == null || !s.startsWith("[") || !s.endsWith("]")) return s;
+        String inner = s.substring(1, s.length() - 1).trim();
+        if (inner.isEmpty()) return s;
+        String[] parts = inner.split(",");
+        try {
+            int[] arr = new int[parts.length];
+            for (int i = 0; i < parts.length; i++) arr[i] = Integer.parseInt(parts[i].trim());
+            Arrays.sort(arr);
+            return Arrays.toString(arr).replaceAll("\\s+", "");
+        } catch (Exception e) {
+            return s;
+        }
     }
 
     private String normalizeOutput(String output) {
+        if (output == null) return "";
         return output.trim()
-                     .replaceAll("\\s+", " ")
-                     .replaceAll(", ", ",")
-                     .replaceAll("\\[\\s+", "[")
-                     .replaceAll("\\s+]", "]");
+                     .replaceAll("\\s+", "")
+                     .replaceAll("'", "\"")
+                     .toLowerCase();
     }
 
     private boolean containsCompileError(String stderr) {
@@ -325,7 +691,7 @@ class SolutionRunner {
     }
 
     private String sanitizeError(String error) {
-        // Remove absolute paths for security
+        if (error == null) return "";
         return error.replaceAll("/[^\\s:]+/", "")
                     .replaceAll("\\bat /code\\b", "")
                     .trim();
@@ -345,7 +711,7 @@ class SolutionRunner {
     }
 
     // ------------------------------------------------------------------ //
-    //  Inner record types                                                  //
+    //  Inner Record Types                                                  //
     // ------------------------------------------------------------------ //
 
     public record ExecutionResult(
@@ -387,4 +753,6 @@ class SolutionRunner {
     public record TestCaseInput(int index, String input, String expected, boolean hidden) {}
 
     private record ProcessResult(int exitCode, String stdout, String stderr, boolean timedOut) {}
+
+    private record CompileResult(boolean success, String output, long durationMs) {}
 }

@@ -2,6 +2,8 @@ package com.leetcode.model;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
@@ -44,6 +46,7 @@ public class Submission {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "test_results", columnDefinition = "jsonb")
     private String testResults;
 

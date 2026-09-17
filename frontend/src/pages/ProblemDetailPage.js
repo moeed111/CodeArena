@@ -27,6 +27,7 @@ export default function ProblemDetailPage() {
   const [running,    setRunning]    = useState(false);
   const [result,     setResult]     = useState(null);
   const [runResult,  setRunResult]  = useState(null);
+  const [activeResultType, setActiveResultType] = useState(null); // 'run' | 'submit'
   const [submissions, setSubmissions] = useState([]);
   const [subLoading,  setSubLoading]  = useState(false);
   const [loading,    setLoading]    = useState(true);
@@ -74,7 +75,11 @@ export default function ProblemDetailPage() {
 
   const handleRun = async () => {
     if (!user) { navigate('/login'); return; }
-    setRunning(true); setRunResult(null); setPanelTab('output');
+    setRunning(true);
+    setActiveResultType('run');
+    setRunResult(null);
+    setResult(null);
+    setPanelTab('output');
     try {
       const { data } = await runCode({ code, language: 'java', problemId: problem.id });
       setRunResult(data);
@@ -87,7 +92,11 @@ export default function ProblemDetailPage() {
 
   const handleSubmit = async () => {
     if (!user) { navigate('/login'); return; }
-    setSubmitting(true); setResult(null); setPanelTab('output');
+    setSubmitting(true);
+    setActiveResultType('submit');
+    setResult(null);
+    setRunResult(null);
+    setPanelTab('output');
     try {
       const { data } = await submitCode({ code, language: 'java', problemId: problem.id });
       setResult(data);
@@ -332,11 +341,11 @@ export default function ProblemDetailPage() {
             {panelTab === 'output' && (
               <div>
                 {/* Run result */}
-                {runResult && !result && (
+                {activeResultType === 'run' && runResult && (
                   <RunResultPanel result={runResult} type="run" />
                 )}
                 {/* Submit result */}
-                {result && (
+                {activeResultType === 'submit' && result && (
                   <RunResultPanel result={result} type="submit" />
                 )}
                 {/* Idle */}
@@ -359,8 +368,28 @@ export default function ProblemDetailPage() {
 }
 
 function RunResultPanel({ result, type }) {
+  const cases = result.testResults || result.results || [];
   const isAccepted = result.status === 'ACCEPTED' || result.status === 'SUCCESS';
-  const allPassed  = result.results?.every(r => r.passed);
+  const allPassed  = cases.length > 0 && cases.every(r => r.passed);
+  const isError    = result.status === 'ERROR' || result.status === 'COMPILE_ERROR' || result.status === 'RUNTIME_ERROR';
+
+  const getStatusLabel = () => {
+    if (type === 'submit') {
+      if (isAccepted) return 'Accepted';
+      if (result.status === 'COMPILE_ERROR') return 'Compile Error';
+      if (result.status === 'TIME_LIMIT_EXCEEDED') return 'Time Limit Exceeded';
+      if (result.status === 'MEMORY_LIMIT_EXCEEDED') return 'Memory Limit Exceeded';
+      if (result.status === 'RUNTIME_ERROR') return 'Runtime Error';
+      return result.status || 'Wrong Answer';
+    } else {
+      if (allPassed) return 'All test cases passed';
+      if (result.status === 'COMPILE_ERROR') return 'Compile Error';
+      if (result.status === 'TIME_LIMIT_EXCEEDED') return 'Time Limit Exceeded';
+      if (result.status === 'RUNTIME_ERROR') return 'Runtime Error';
+      if (isError) return result.status || 'Execution Error';
+      return 'Some test cases failed';
+    }
+  };
 
   return (
     <div className="space-y-3">
@@ -369,11 +398,7 @@ function RunResultPanel({ result, type }) {
         isAccepted || allPassed ? 'text-green-400' : 'text-red-400'
       }`}>
         <span>{isAccepted || allPassed ? '✓' : '✕'}</span>
-        <span>
-          {type === 'submit'
-            ? (isAccepted ? 'Accepted' : (result.status || 'Wrong Answer'))
-            : (allPassed ? 'All tests passed' : 'Some tests failed')}
-        </span>
+        <span>{getStatusLabel()}</span>
         {result.runtimeMs > 0 && (
           <span className="text-gray-500 font-normal ml-2 text-xs">Runtime: {result.runtimeMs}ms</span>
         )}
@@ -392,9 +417,9 @@ function RunResultPanel({ result, type }) {
       )}
 
       {/* Test case results */}
-      {result.results?.length > 0 && (
+      {cases.length > 0 && (
         <div className="space-y-2">
-          {result.results.slice(0, 6).map((r, i) => (
+          {cases.slice(0, 6).map((r, i) => (
             <div key={i} className={`rounded p-2.5 border text-xs font-mono ${
               r.passed
                 ? 'bg-green-900/20 border-green-800/40'
@@ -405,13 +430,13 @@ function RunResultPanel({ result, type }) {
                   {r.passed ? '✓' : '✕'} Case {r.index + 1}
                 </span>
                 {r.hidden && <span className="text-gray-500">(hidden)</span>}
-                <span className="text-gray-600">{r.runtimeMs}ms</span>
+                {r.runtimeMs !== undefined && <span className="text-gray-600">{r.runtimeMs}ms</span>}
               </div>
               {!r.hidden && r.input && (
                 <div className="space-y-0.5 text-gray-300">
                   <div><span className="text-gray-500">Input:    </span>{r.input}</div>
                   <div><span className="text-gray-500">Expected: </span>{r.expected}</div>
-                  {!r.passed && <div><span className="text-gray-500">Got:      </span><span className="text-red-300">{r.actual}</span></div>}
+                  {!r.passed && <div><span className="text-gray-500">Got:      </span><span className="text-red-300">{r.actual || '(no output)'}</span></div>}
                 </div>
               )}
               {r.errorMessage && (
@@ -419,11 +444,12 @@ function RunResultPanel({ result, type }) {
               )}
             </div>
           ))}
-          {result.results.length > 6 && (
-            <p className="text-xs text-gray-500">… and {result.results.length - 6} more test cases</p>
+          {cases.length > 6 && (
+            <p className="text-xs text-gray-500">… and {cases.length - 6} more test cases</p>
           )}
         </div>
       )}
     </div>
   );
 }
+

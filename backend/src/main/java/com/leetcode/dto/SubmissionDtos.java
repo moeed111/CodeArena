@@ -33,7 +33,11 @@ public class SubmissionDtos {
         int totalTests,
         List<TestResultDto> testResults,
         LocalDateTime submittedAt
-    ) {}
+    ) {
+        public List<TestResultDto> results() {
+            return testResults;
+        }
+    }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SubmissionSummaryDto(

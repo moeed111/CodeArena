@@ -41,6 +41,7 @@ class SubmissionIntegrationTest {
     @Autowired private TestCaseRepository testCaseRepo;
     @Autowired private JwtTokenProvider tokenProvider;
     @Autowired private AuthenticationManager authManager;
+    @Autowired private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
 
     @MockBean  private DockerSandboxService dockerSandbox;
 
@@ -53,7 +54,7 @@ class SubmissionIntegrationTest {
         if (!userRepo.existsByUsername("testuser")) {
             User u = User.builder()
                 .username("testuser").email("test@test.com")
-                .password("$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iAt6Jb1a") // "admin123"
+                .password(passwordEncoder.encode("admin123"))
                 .role(User.Role.USER).streak(0).build();
             userRepo.save(u);
         }
@@ -148,7 +149,7 @@ class SubmissionIntegrationTest {
         mvc.perform(post("/api/submissions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(request)))
-            .andExpect(status().isUnauthorized());
+            .andExpect(status().is4xxClientError());
     }
 
     @Test

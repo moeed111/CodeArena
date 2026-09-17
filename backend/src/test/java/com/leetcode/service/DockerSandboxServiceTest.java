@@ -100,6 +100,76 @@ class DockerSandboxServiceTest {
         assertThat(results.get(2).passed()).isTrue();
     }
 
+    @Test
+    @DisplayName("Real execution: Two Sum passes correctly")
+    void realExecution_twoSum() {
+        String solution = """
+            class Solution {
+                public int[] twoSum(int[] nums, int target) {
+                    for (int i = 0; i < nums.length; i++) {
+                        for (int j = i + 1; j < nums.length; j++) {
+                            if (nums[i] + nums[j] == target) return new int[]{i, j};
+                        }
+                    }
+                    return new int[0];
+                }
+            }
+            """;
+        List<TestCaseInput> inputs = List.of(
+            new TestCaseInput(0, "{\"nums\": [2, 7, 11, 15], \"target\": 9}", "[0, 1]", false),
+            new TestCaseInput(1, "{\"nums\": [3, 2, 4], \"target\": 6}", "[1, 2]", false)
+        );
+
+        List<TestCaseResult> results = sandbox.runTestCases(solution, inputs, "two-sum");
+
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).passed()).isTrue();
+        assertThat(results.get(1).passed()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Real execution: Valid Parentheses passes correctly")
+    void realExecution_validParentheses() {
+        String solution = """
+            class Solution {
+                public boolean isValid(String s) {
+                    java.util.Stack<Character> stack = new java.util.Stack<>();
+                    for (char c : s.toCharArray()) {
+                        if (c == '(') stack.push(')');
+                        else if (c == '{') stack.push('}');
+                        else if (c == '[') stack.push(']');
+                        else if (stack.isEmpty() || stack.pop() != c) return false;
+                    }
+                    return stack.isEmpty();
+                }
+            }
+            """;
+        List<TestCaseInput> inputs = List.of(
+            new TestCaseInput(0, "{\"s\": \"()\"}", "true", false),
+            new TestCaseInput(1, "{\"s\": \"(]\"}", "false", false)
+        );
+
+        List<TestCaseResult> results = sandbox.runTestCases(solution, inputs, "valid-parentheses");
+
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).passed()).isTrue();
+        assertThat(results.get(1).passed()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Real execution: Compile error is captured cleanly")
+    void realExecution_compileError() {
+        String badCode = "class Solution { public int broken() { return } }";
+        List<TestCaseInput> inputs = List.of(new TestCaseInput(0, "{}", "0", false));
+
+        List<TestCaseResult> results = sandbox.runTestCases(badCode, inputs, "broken");
+
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).status()).isEqualTo("COMPILE_ERROR");
+        assertThat(results.get(0).passed()).isFalse();
+        assertThat(results.get(0).errorMessage()).isNotEmpty();
+    }
+
     // Mockito helper – needed inside the test class due to package visibility
     private String anyString() { return Mockito.anyString(); }
     private String eq(String s) { return Mockito.eq(s); }
